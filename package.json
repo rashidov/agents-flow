@@ -1,0 +1,21 @@
+{
+  "name": "agents-flow",
+  "version": "1.0.0",
+  "description": "Lovable-like agent built with Claude API",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@langchain/core": "^1.1.32",
+    "@langchain/langgraph": "^1.2.2",
+    "dotenv": "^17.3.1",
+    "openai": "^6.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
