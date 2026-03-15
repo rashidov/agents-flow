@@ -5,6 +5,7 @@ import { execSync } from "node:child_process";
 // ── Sandbox ──────────────────────────────────────────────────────────────────
 
 const SANDBOX_DIR = path.resolve("./sandbox");
+fs.mkdirSync(SANDBOX_DIR, { recursive: true });
 
 function sandboxPath(filePath: string): string {
   const resolved = path.resolve(SANDBOX_DIR, filePath);
@@ -34,8 +35,11 @@ export function readFile(filePath: string): string {
 export function listFiles(): string {
   if (!fs.existsSync(SANDBOX_DIR)) return "[]";
 
+  const SKIP_DIRS = new Set(["node_modules", "dist", ".vite"]);
+
   const walk = (dir: string): string[] => {
     return fs.readdirSync(dir).flatMap((name) => {
+      if (SKIP_DIRS.has(name)) return [];
       const full = path.join(dir, name);
       return fs.statSync(full).isDirectory()
         ? walk(full)

@@ -1,4 +1,4 @@
-import type { ActionLog } from "../types.js";
+import type { ActionLog, ExecutionEvent, PlanStep } from "../types.js";
 
 export interface Report {
   id: string;
@@ -10,4 +10,8 @@ export interface Report {
   durationMs: number;
   message: string;
   actions: ActionLog[];
+  /** Лог событий: планирование, валидация, ретраи, реплан */
+  events: ExecutionEvent[];
+  /** Изначальный план */
+  plan: PlanStep[];
 }

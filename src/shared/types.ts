@@ -8,11 +8,30 @@ export interface ActionLog {
   timestamp: string;
 }
 
+/** Событие хода выполнения (для подробных отчётов) */
+export interface ExecutionEvent {
+  type:
+    | "plan-created"
+    | "step-start"
+    | "step-ok"
+    | "step-retry"
+    | "step-abort"
+    | "replan"
+    | "error";
+  timestamp: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 export interface AgentResult {
   status: "success" | "error";
   message: string;
   actions: ActionLog[];
   steps: number;
+  /** Лог событий: планирование, валидация, ретраи, реплан */
+  events?: ExecutionEvent[];
+  /** Изначальный план */
+  plan?: PlanStep[];
 }
 
 /** Шаг плана (используется в multi-agent) */
@@ -21,7 +40,10 @@ export interface PlanStep {
   expectedOutput: string;
   targetFiles: string[];
   stepType: "create-file" | "modify-file" | "run-command" | "multi";
-  validationHints?: string[];
+  /** Сложность шага: low → Haiku, high → Sonnet */
+  complexity: "low" | "high";
+  /** Какие файлы из memory-bank передать executor'у (например ["vite-react-setup.md"]) */
+  memoryKeys: string[];
 }
 
 /** Выполненный шаг — хранит какие файлы были созданы */

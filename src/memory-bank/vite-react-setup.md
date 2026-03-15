@@ -1,6 +1,7 @@
 # Как создать React + Vite + TypeScript проект
 
 ## package.json (минимальный)
+
 ```json
 {
   "name": "app",
@@ -26,6 +27,7 @@
 ```
 
 ## vite.config.ts
+
 ```ts
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
@@ -36,6 +38,7 @@ export default defineConfig({
 ```
 
 ## tsconfig.json
+
 ```json
 {
   "compilerOptions": {
@@ -52,22 +55,24 @@ export default defineConfig({
 ```
 
 ## index.html (в корне проекта, НЕ в src/)
+
 ```html
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>App</title>
-</head>
-<body>
-  <div id="root"></div>
-  <script type="module" src="/src/main.tsx"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>App</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>
 ```
 
 ## src/main.tsx
+
 ```tsx
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -76,11 +81,12 @@ import App from "./App";
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <App />
-  </StrictMode>
+  </StrictMode>,
 );
 ```
 
 ## Порядок создания файлов
+
 1. package.json
 2. vite.config.ts
 3. tsconfig.json

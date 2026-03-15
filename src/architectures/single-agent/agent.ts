@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { TOOL_SCHEMAS } from "../../shared/tools/schemas.js";
 import { dispatchTool } from "../../shared/tools/dispatcher.js";
 import { listFiles } from "../../shared/tools/executor.js";
@@ -7,8 +7,8 @@ import type { Architecture, AgentResult, ActionLog } from "../../shared/types.js
 // ── Single Agent ─────────────────────────────────────────────────────────────
 // Один агент делает всё: планирует, пишет код, исправляет ошибки.
 
-const client = new OpenAI();
-const MODEL = "gpt-4o";
+const client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL });
+const MODEL = "claude-sonnet-4-6";
 
 async function run(userRequest: string): Promise<AgentResult> {
   const actions: ActionLog[] = [];
@@ -16,7 +16,7 @@ async function run(userRequest: string): Promise<AgentResult> {
 
   const currentFiles = listFiles();
 
-  const systemPrompt = `Ты — генератор веб-приложений на React.
+  const system = `Ты — генератор веб-приложений на React.
 
 Текущее состояние проекта (файлы на диске):
 ${currentFiles}
@@ -30,66 +30,67 @@ ${currentFiles}
 Стек: React + Vite + TypeScript + Tailwind CSS
 Компоненты в src/components/`;
 
-  const messages: OpenAI.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemPrompt },
+  const messages: Anthropic.MessageParam[] = [
     { role: "user", content: userRequest },
   ];
 
   const MAX_STEPS = 30;
 
   while (step < MAX_STEPS) {
-    const response = await client.chat.completions.create({
+    const response = await client.messages.create({
       model: MODEL,
       max_tokens: 4096,
+      system,
       tools: TOOL_SCHEMAS,
       messages,
     });
 
-    const choice = response.choices[0]!;
-
     // Агент завершил работу
-    if (choice.finish_reason === "stop") {
+    if (response.stop_reason === "end_turn") {
+      const textBlock = response.content.find((b) => b.type === "text");
+      const text = textBlock?.type === "text" ? textBlock.text : "";
       return {
         status: "success",
-        message: choice.message.content ?? "",
+        message: text,
         actions,
         steps: step,
       };
     }
 
     // Агент вызывает инструменты
-    if (choice.finish_reason === "tool_calls") {
-      const toolCalls = choice.message.tool_calls ?? [];
+    if (response.stop_reason === "tool_use") {
+      const toolUseBlocks = response.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
+      );
 
-      // Добавляем ответ ассистента в историю
-      messages.push(choice.message);
+      messages.push({ role: "assistant", content: response.content });
 
-      for (const toolCall of toolCalls) {
-        if (toolCall.type !== "function") continue;
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
+      for (const toolUse of toolUseBlocks) {
         step++;
-        const toolInput = JSON.parse(toolCall.function.arguments) as Record<string, string>;
+        const toolInput = toolUse.input as Record<string, string>;
 
-        console.log(`  [single][${step}] ${toolCall.function.name}(${JSON.stringify(toolInput).slice(0, 80)}...)`);
+        console.log(`  [single][${step}] ${toolUse.name}(${JSON.stringify(toolInput).slice(0, 80)}...)`);
 
-        const result = dispatchTool(toolCall.function.name, toolInput);
+        const result = dispatchTool(toolUse.name, toolInput);
 
         actions.push({
           step,
-          tool: toolCall.function.name,
+          tool: toolUse.name,
           input: toolInput,
           result: result.slice(0, 500),
           timestamp: new Date().toISOString(),
         });
 
-        // OpenAI: каждый tool_result — отдельное сообщение с tool_call_id
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
           content: result,
         });
       }
 
+      messages.push({ role: "user", content: toolResults });
       continue;
     }
 

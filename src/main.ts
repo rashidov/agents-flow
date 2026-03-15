@@ -52,11 +52,19 @@ async function main() {
   try {
     const result = await architecture.run(request);
     const durationMs = Date.now() - startTime;
-
     const report = saveReport(architecture.name, request, result, durationMs);
     printReport(report);
   } catch (err) {
-    console.error("Ошибка:", err);
+    const durationMs = Date.now() - startTime;
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Ошибка:", message);
+    const report = saveReport(architecture.name, request, {
+      status: "error",
+      message: `Критическая ошибка: ${message}`,
+      actions: [],
+      steps: 0,
+    }, durationMs);
+    printReport(report);
     process.exit(1);
   }
 }

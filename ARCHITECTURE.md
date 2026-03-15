@@ -61,7 +61,26 @@ interface PlanStep {
 
 ## Узлы графа
 
-### 1. Планировщик (planner.ts) — GPT-4o
+### 1. Планировщик (planner.ts) — claude-sonnet-4-6
+
+**Валидация ответа LLM — Zod:**
+
+Ответ модели парсится через `PlanResponseSchema.parse()`:
+```typescript
+const PlanStepSchema = z.object({
+  description:     z.string().default(""),
+  expectedOutput:  z.string().default(""),
+  targetFiles:     z.array(z.string()).default([]),
+  stepType:        z.enum(["create-file", "modify-file", "run-command", "multi"]).default("multi"),
+  validationHints: z.array(z.string()).optional(),
+});
+
+const PlanResponseSchema = z.object({
+  steps: z.array(PlanStepSchema).min(1),
+});
+```
+
+Если LLM вернёт невалидный `stepType`, пропустит обязательное поле или вернёт пустой массив — Zod выбросит ошибку сразу на границе парсинга. Дефолты (`""`, `[]`, `"multi"`) проставляются схемой.
 
 **createPlan(userRequest):**
 - Промпт требует `targetFiles`, `stepType`, `validationHints` в каждом шаге
@@ -73,7 +92,7 @@ interface PlanStep {
 - Промпт: "Эти файлы уже созданы: [список]. НЕ пересоздавай их."
 - Меняет подход если предыдущий не сработал
 
-### 2. Исполнитель (executor.ts) — GPT-4o-mini
+### 2. Исполнитель (executor.ts) — claude-haiku-4-5-20251001
 
 - Выполняет ОДИН шаг плана через tool loop (макс 10 tool calls)
 - Параметр `retryFeedback?: string` — при retry в промпт добавляется: "Предыдущая попытка не удалась: {feedback}. Исправь проблему."
@@ -92,7 +111,7 @@ interface PlanStep {
 
 Не прошла → `{ action: "retry", reason, feedback }` без вызова LLM.
 
-**Фаза 2: LLM-проверка (GPT-4o-mini, только если Фаза 1 прошла)**
+**Фаза 2: LLM-проверка (claude-haiku-4-5-20251001, только если Фаза 1 прошла)**
 
 - Вызывается для шагов с `validationHints` или `stepType === "multi"`
 - Получает содержимое файлов с диска + hints
@@ -148,7 +167,7 @@ src/
 
 - [x] graph.ts — граф с replanCount, feedback передачей, правильным роутингом
 - [x] shared/types.ts — CompletedStep, StepError, расширенный PlanStep, ValidationDecision
-- [x] planner.ts — промпт с targetFiles/stepType, replan принимает CompletedStep[]
+- [x] planner.ts — промпт с targetFiles/stepType, replan принимает CompletedStep[], Zod-валидация LLM-ответа
 - [x] executor.ts — параметр retryFeedback
 - [x] validator.ts — двухфазная валидация (детерминированная + LLM)
 - [x] main.ts — только single и multi (LangGraph), orchestrator удалён

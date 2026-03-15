@@ -1,20 +1,39 @@
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { TOOL_SCHEMAS } from "../../shared/tools/schemas.js";
 import { dispatchTool } from "../../shared/tools/dispatcher.js";
 import { listFiles } from "../../shared/tools/executor.js";
+import { loadMemoryFiles } from "../../memory-bank/loader.js";
 import type { PlanStep, CompletedStep, ActionLog } from "../../shared/types.js";
 
 // ── Исполнитель ──────────────────────────────────────────────────────────────
-// GPT-4o-mini — дешёвая модель. Выполняет ОДИН шаг плана за раз.
-// Чистый контекст на каждый шаг.
+// Модель выбирается по complexity шага:
+//   low  → Haiku  (быстро, дёшево — конфиги, типы, стили)
+//   high → Sonnet (умнее — компоненты с логикой, хуки, утилиты)
 
-const client = new OpenAI();
-const MODEL = "codex-mini-latest";
+const client = new Anthropic({ baseURL: process.env.ANTHROPIC_BASE_URL });
+
+const MODELS: Record<PlanStep["complexity"], string> = {
+  low: "claude-haiku-4-5-20251001",
+  high: "claude-sonnet-4-6",
+};
+
+const TOOL_LIMITS: Record<PlanStep["complexity"], number> = {
+  low: 10,
+  high: 20,
+};
+
+export interface StepMetrics {
+  model: string;
+  durationMs: number;
+  inputTokens: number;
+  outputTokens: number;
+}
 
 export interface StepResult {
   success: boolean;
   actions: ActionLog[];
   error?: string;
+  metrics: StepMetrics;
 }
 
 export async function executeStep(
@@ -25,89 +44,118 @@ export async function executeStep(
 ): Promise<StepResult> {
   const actions: ActionLog[] = [];
   let toolStep = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  const stepStartTime = Date.now();
 
   const currentFiles = listFiles();
+  const model = MODELS[planStep.complexity];
+  const maxToolCalls = TOOL_LIMITS[planStep.complexity];
+  const memory = loadMemoryFiles(planStep.memoryKeys);
 
   const retrySection = retryFeedback
     ? `\nПредыдущая попытка не удалась:\n${retryFeedback}\nИсправь проблему и не повторяй ту же ошибку.\n`
     : "";
 
-  const messages: OpenAI.ChatCompletionMessageParam[] = [
-    {
-      role: "system",
-      content: `Ты — исполнитель. Выполни ОДНУ конкретную задачу.
+  const memorySection = memory
+    ? `\nБаза знаний (используй как референс):\n${memory}\n`
+    : "";
+
+  const system = `Ты — исполнитель. Выполни ОДНУ конкретную задачу.
 
 Текущие файлы проекта: ${currentFiles}
 
 Уже выполненные шаги:
 ${completedSteps.map((s, i) => `  ${i + 1}. ${s.description}`).join("\n") || "  (пока нет)"}
-${retrySection}
+${retrySection}${memorySection}
 Правила:
 - Выполни ТОЛЬКО задачу ниже, ничего лишнего
 - Перед редактированием файла — вызови read_file()
 - Если нужно создать файл — используй create_file()
-- Если нужно выполнить команду — используй run_command()`,
-    },
+- Если нужно выполнить команду — используй run_command()`;
+
+  console.log(`  [executor] Модель: ${model}, лимит вызовов: ${maxToolCalls}, memory: [${planStep.memoryKeys.join(", ")}]`);
+
+  const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
       content: `Задача: ${planStep.description}\nОжидаемый результат: ${planStep.expectedOutput}`,
     },
   ];
 
-  const MAX_TOOL_CALLS = 10;
-
-  while (toolStep < MAX_TOOL_CALLS) {
-    const response = await client.chat.completions.create({
-      model: MODEL,
+  while (toolStep < maxToolCalls) {
+    const response = await client.messages.create({
+      model,
       max_tokens: 4096,
+      system,
       tools: TOOL_SCHEMAS,
       messages,
     });
 
-    const choice = response.choices[0]!;
+    totalInputTokens += response.usage.input_tokens;
+    totalOutputTokens += response.usage.output_tokens;
 
-    if (choice.finish_reason === "stop") {
-      return { success: true, actions };
+    if (response.stop_reason === "end_turn") {
+      const metrics: StepMetrics = {
+        model,
+        durationMs: Date.now() - stepStartTime,
+        inputTokens: totalInputTokens,
+        outputTokens: totalOutputTokens,
+      };
+      console.log(`  [executor] Завершён: ${metrics.durationMs}ms, ${metrics.inputTokens}+${metrics.outputTokens} токенов`);
+      return { success: true, actions, metrics };
     }
 
-    if (choice.finish_reason === "tool_calls") {
-      const toolCalls = choice.message.tool_calls ?? [];
-      messages.push(choice.message);
+    if (response.stop_reason === "tool_use") {
+      const toolUseBlocks = response.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
+      );
 
-      for (const toolCall of toolCalls) {
-        if (toolCall.type !== "function") continue;
+      messages.push({ role: "assistant", content: response.content });
 
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+      for (const toolUse of toolUseBlocks) {
         toolStep++;
-        const toolInput = JSON.parse(toolCall.function.arguments) as Record<string, string>;
+        const toolInput = toolUse.input as Record<string, string>;
 
-        console.log(`  [executor][step ${stepIndex + 1}][${toolStep}] ${toolCall.function.name}(${JSON.stringify(toolInput).slice(0, 60)}...)`);
+        console.log(`  [executor][step ${stepIndex + 1}][${toolStep}] ${toolUse.name}(${JSON.stringify(toolInput).slice(0, 60)}...)`);
 
-        const result = dispatchTool(toolCall.function.name, toolInput);
+        const result = dispatchTool(toolUse.name, toolInput);
 
         actions.push({
           step: stepIndex * 100 + toolStep,
-          tool: toolCall.function.name,
+          tool: toolUse.name,
           input: toolInput,
           result: result.slice(0, 500),
           timestamp: new Date().toISOString(),
         });
 
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
           content: result,
         });
       }
 
+      messages.push({ role: "user", content: toolResults });
       continue;
     }
 
     break;
   }
 
+  const metrics: StepMetrics = {
+    model,
+    durationMs: Date.now() - stepStartTime,
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+  };
+  console.log(`  [executor] Не завершён: ${metrics.durationMs}ms, ${metrics.inputTokens}+${metrics.outputTokens} токенов`);
   return {
     success: false,
     actions,
-    error: `Шаг не завершён за ${MAX_TOOL_CALLS} вызовов`,
+    error: `Шаг не завершён за ${maxToolCalls} вызовов`,
+    metrics,
   };
 }

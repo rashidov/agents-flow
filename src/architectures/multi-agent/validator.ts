@@ -1,133 +1,128 @@
-import OpenAI from "openai";
-import { listFiles, readFile } from "../../shared/tools/executor.js";
-import type { PlanStep, ActionLog, ValidationDecision } from "../../shared/types.js";
+import postcss from "postcss";
+import { readFile } from "../../shared/tools/executor.js";
+import type {
+  PlanStep,
+  ActionLog,
+  ValidationDecision,
+} from "../../shared/types.js";
 
 // ── Валидатор ────────────────────────────────────────────────────────────────
-// Двухфазная валидация:
-//   Фаза 1 — детерминированные проверки (без LLM): файлы, exit code
-//   Фаза 2 — LLM-проверка семантики (только если Фаза 1 прошла + есть hints)
+// Детерминированная валидация (без LLM).
+// Проверяет реальные действия executor'а (actions), а НЕ ожидания плана.
+//   1. Executor вызвал хотя бы один инструмент
+//   2. Созданные файлы не пустые
+//   3. CSS файлы валидны (postcss)
+//   4. Команды завершились с exit_code=0
 
-const client = new OpenAI();
-const MODEL = "gpt-4o-mini";
+// ── Извлечение реально созданных/изменённых файлов из actions ─────────────────
 
-// ── Фаза 1: Детерминированные проверки ───────────────────────────────────────
-
-function checkDeterministic(
-  planStep: PlanStep,
-  stepActions: ActionLog[]
-): ValidationDecision | null {
-  const existingFiles = new Set(listFiles().split("\n").map((f) => f.trim()));
-
-  // Проверка наличия и непустоты целевых файлов
-  if (planStep.stepType !== "run-command" && planStep.targetFiles.length > 0) {
-    for (const target of planStep.targetFiles) {
-      const normalizedTarget = target.replace(/^\.\//, "");
-      const found = [...existingFiles].some(
-        (f) => f === normalizedTarget || f.endsWith(normalizedTarget)
-      );
-
-      if (!found) {
-        return {
-          action: "retry",
-          reason: `Файл не создан: ${target}`,
-          feedback: `Файл "${target}" отсутствует на диске. Создай его с помощью create_file().`,
-        };
-      }
-
-      const content = readFile(normalizedTarget);
-      if (!content || content.trim().length === 0) {
-        return {
-          action: "retry",
-          reason: `Файл пустой: ${target}`,
-          feedback: `Файл "${target}" существует, но пустой. Запиши правильное содержимое.`,
-        };
-      }
-    }
-  }
-
-  // Проверка ошибок в run-command шагах
-  if (planStep.stepType === "run-command") {
-    const cmdActions = stepActions.filter((a) => a.tool === "run_command");
-    for (const action of cmdActions) {
-      const result = action.result.toLowerCase();
-      if (
-        result.includes("error") ||
-        result.includes("failed") ||
-        result.includes("exit code 1") ||
-        result.includes("npm warn") && result.includes("could not resolve")
-      ) {
-        const excerpt = action.result.slice(0, 300);
-        return {
-          action: "retry",
-          reason: `Команда завершилась с ошибкой`,
-          feedback: `Ошибка выполнения команды:\n${excerpt}\nИсправь ошибки в файлах и повтори.`,
-        };
-      }
-    }
-  }
-
-  return null; // все детерминированные проверки прошли
+function getCreatedFiles(stepActions: ActionLog[]): string[] {
+  return stepActions
+    .filter((a) => a.tool === "create_file" && a.result.startsWith("OK"))
+    .map((a) => (a.input as Record<string, string>).path)
+    .filter(Boolean);
 }
 
-// ── Фаза 2: LLM семантическая проверка ───────────────────────────────────────
+// ── Проверка: executor что-то сделал? ────────────────────────────────────────
 
-async function checkSemantic(
+function checkActionsExist(
   planStep: PlanStep,
-  stepError?: string
-): Promise<ValidationDecision> {
-  const currentFiles = listFiles();
+  stepActions: ActionLog[],
+): ValidationDecision | null {
+  if (planStep.stepType === "run-command") return null;
 
-  // Читаем содержимое целевых файлов для передачи в LLM
-  const fileContents = planStep.targetFiles
-    .map((f) => {
-      const content = readFile(f.replace(/^\.\//, ""));
-      return content ? `=== ${f} ===\n${content.slice(0, 800)}` : null;
-    })
-    .filter(Boolean)
-    .join("\n\n");
+  const writes = stepActions.filter(
+    (a) => a.tool === "create_file" || a.tool === "edit_file",
+  );
 
-  const hintsSection = planStep.validationHints?.length
-    ? `\nОжидаемые свойства файлов:\n${planStep.validationHints.map((h) => `  - ${h}`).join("\n")}`
-    : "";
-
-  const response = await client.chat.completions.create({
-    model: MODEL,
-    max_tokens: 256,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `Ты — валидатор кода. Проверяешь результат выполнения шага.
-
-Все файлы проекта: ${currentFiles}
-${hintsSection}
-
-Ответь в JSON:
-{ "action": "continue" }                               — шаг выполнен корректно
-{ "action": "retry", "reason": "...", "feedback": "..." } — нужно исправить (feedback = конкретная инструкция)
-{ "action": "abort", "reason": "..." }                 — критическая ошибка, нужно перепланировать`,
-      },
-      {
-        role: "user",
-        content: `Шаг: ${planStep.description}
-Ожидалось: ${planStep.expectedOutput}
-${stepError ? `Ошибка исполнителя: ${stepError}` : "Исполнитель завершил без ошибок."}
-
-Содержимое файлов:
-${fileContents || "(нет)"}
-
-Проверь и реши: continue, retry или abort?`,
-      },
-    ],
-  });
-
-  const text = response.choices[0]!.message.content ?? "{}";
-
-  try {
-    return JSON.parse(text) as ValidationDecision;
-  } catch {
-    return { action: "continue" };
+  if (writes.length === 0) {
+    return {
+      action: "retry",
+      reason: "Executor не создал и не изменил ни одного файла",
+      feedback:
+        "Ни один файл не был создан или изменён. Используй create_file() для создания файлов.",
+    };
   }
+
+  return null;
+}
+
+// ── Проверка: созданные файлы не пустые ──────────────────────────────────────
+
+function checkFilesNotEmpty(stepActions: ActionLog[]): ValidationDecision | null {
+  const createdFiles = getCreatedFiles(stepActions);
+
+  for (const filePath of createdFiles) {
+    const content = readFile(filePath);
+    if (!content || content.trim().length === 0) {
+      return {
+        action: "retry",
+        reason: `Файл пустой: ${filePath}`,
+        feedback: `Файл "${filePath}" существует, но пустой. Запиши правильное содержимое.`,
+      };
+    }
+  }
+
+  return null;
+}
+
+// ── Синтаксис CSS через postcss ──────────────────────────────────────────────
+// Проверяем CSS файлы, которые реально были созданы в этом шаге.
+
+function checkCSSSyntax(stepActions: ActionLog[]): ValidationDecision | null {
+  const cssFiles = getCreatedFiles(stepActions).filter((f) => f.endsWith(".css"));
+
+  for (const filePath of cssFiles) {
+    const content = readFile(filePath);
+    if (!content || content.startsWith("ERROR")) continue;
+
+    try {
+      postcss.parse(content);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        action: "retry",
+        reason: `Невалидный CSS в ${filePath}: ${message}`,
+        feedback: `CSS файл "${filePath}" содержит синтаксическую ошибку: ${message}. Исправь синтаксис.`,
+      };
+    }
+  }
+
+  return null;
+}
+
+// ── Проверка run-command ─────────────────────────────────────────────────────
+// Проверяем только exit_code — это надёжный индикатор. Слова "error"/"failed"
+// в stdout могут быть warnings и ложными срабатываниями.
+
+function checkRunCommand(
+  planStep: PlanStep,
+  stepActions: ActionLog[],
+): ValidationDecision | null {
+  if (planStep.stepType !== "run-command") return null;
+
+  const cmdActions = stepActions.filter((a) => a.tool === "run_command");
+
+  if (cmdActions.length === 0) {
+    return {
+      action: "retry",
+      reason: "Команда не была выполнена",
+      feedback: "Используй run_command() для выполнения команды.",
+    };
+  }
+
+  for (const action of cmdActions) {
+    if (action.result.startsWith("exit_code=1")) {
+      const excerpt = action.result.slice(0, 500);
+      return {
+        action: "retry",
+        reason: "Команда завершилась с ошибкой",
+        feedback: `Ошибка выполнения команды:\n${excerpt}\nИсправь ошибки и повтори.`,
+      };
+    }
+  }
+
+  return null;
 }
 
 // ── Публичный интерфейс ───────────────────────────────────────────────────────
@@ -135,24 +130,20 @@ ${fileContents || "(нет)"}
 export async function validateStep(
   planStep: PlanStep,
   stepActions: ActionLog[],
-  stepError?: string
+  _stepError?: string,
 ): Promise<ValidationDecision> {
-  // Фаза 1: быстрые детерминированные проверки
-  const deterministicResult = checkDeterministic(planStep, stepActions);
-  if (deterministicResult) {
-    const reason = deterministicResult.action !== "continue" ? deterministicResult.reason : "";
-    console.log(`  [validator] Фаза 1 не прошла: ${reason}`);
-    return deterministicResult;
-  }
+  const checks = [
+    checkActionsExist(planStep, stepActions),
+    checkFilesNotEmpty(stepActions),
+    checkCSSSyntax(stepActions),
+    checkRunCommand(planStep, stepActions),
+  ];
 
-  // Фаза 2: LLM только для сложных шагов (с hints, multi, или при ошибке)
-  const needsLLM =
-    stepError ||
-    planStep.stepType === "multi" ||
-    (planStep.validationHints && planStep.validationHints.length > 0);
-
-  if (needsLLM) {
-    return checkSemantic(planStep, stepError);
+  for (const result of checks) {
+    if (result && result.action !== "continue") {
+      console.log(`  [validator] ${result.reason}`);
+      return result;
+    }
   }
 
   return { action: "continue" };
